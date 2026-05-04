@@ -1,0 +1,12 @@
+{
+  "name": "battleship-network-test",
+  "version": "1.0.0",
+  "description": "3–4 player Battleship over WebSockets (network testing tool)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

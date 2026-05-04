@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Battleship (3–4p) — Network test</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e6edf3;
+      --muted: #8b9cb3;
+      --accent: #3d8bfd;
+      --hit: #e5534b;
+      --miss: #6e7681;
+      --ship: #238636;
+      --valid: #2ea043;
+      --invalid: #da3633;
+      --turn: #f0883e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 8px; }
+    h2 { font-size: 0.95rem; margin: 0 0 8px; color: var(--muted); }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .hidden { display: none !important; }
+    input[type="text"], select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      width: 100%;
+      max-width: 280px;
+    }
+    button {
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font: inherit;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary { background: var(--accent); color: #fff; }
+    button.warn { background: var(--turn); color: #111; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    .grid-wrap { display: inline-block; }
+    .grid-label { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    table.grid { border-collapse: collapse; user-select: none; }
+    table.grid td {
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border);
+      text-align: center;
+      font-size: 10px;
+      cursor: default;
+    }
+    table.grid td.corner { background: transparent; border: none; cursor: default; }
+    table.grid td.header { background: #222c3a; cursor: default; }
+    table.grid td.cell { background: #141c28; }
+    table.grid td.cell:hover:not(.disabled) { filter: brightness(1.15); }
+    table.grid td.valid { background: rgba(46, 160, 67, 0.35); }
+    table.grid td.invalid { background: rgba(218, 54, 51, 0.35); }
+    table.grid td.ship { background: var(--ship); }
+    table.grid td.hit { background: var(--hit); color: #fff; }
+    table.grid td.miss { background: var(--miss); color: #fff; }
+    table.grid td.disabled { opacity: 0.55; pointer-events: none; }
+    .split { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    .board-col { flex: 1; min-width: 280px; }
+    .attack-active {
+      outline: 3px solid var(--turn);
+      outline-offset: 4px;
+      border-radius: 8px;
+    }
+    .banner-turn {
+      background: rgba(240, 136, 62, 0.2);
+      border: 1px solid var(--turn);
+      color: var(--turn);
+      padding: 6px 10px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .banner-wait { background: #222c3a; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; color: var(--muted); }
+    .banner-reconnect {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: #9e6a03; color: #111; text-align: center; padding: 8px; z-index: 1000;
+      font-weight: 600;
+    }
+    #log {
+      height: 140px;
+      overflow-y: auto;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+    .status-bar { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--muted); }
+    .status-bar span { background: #141c28; padding: 4px 8px; border-radius: 4px; }
+    .net-panel {
+      position: fixed;
+      bottom: 8px;
+      right: 8px;
+      width: 260px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      z-index: 900;
+      font-size: 11px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.4);
+    }
+    .net-panel h3 {
+      margin: 0;
+      padding: 8px 10px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .net-body { padding: 8px 10px; line-height: 1.5; }
+    .net-body.collapsed { display: none; }
+    ul.ships { margin: 0; padding-left: 18px; color: var(--muted); }
+    .results ol { padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <div id="reconnectBanner" class="banner-reconnect hidden">Reconnecting…</div>
+  <div class="wrap">
+    <h1>Battleship (3–4 players)</h1>
+    <p style="color:var(--muted);margin:0 0 12px;">Network lab — open DevTools Console to inspect raw WebSocket traffic (↑ send / ↓ recv).</p>
+
+    <section id="screenJoin" class="panel">
+      <h2>Join</h2>
+      <div class="row">
+        <input type="text" id="username" placeholder="Username" maxlength="32" />
+        <button class="primary" id="btnJoin">Connect & join</button>
+      </div>
+    </section>
+
+    <section id="screenLobby" class="panel hidden">
+      <h2>Lobby</h2>
+      <p id="lobbyMsg">Waiting for players…</p>
+      <ul id="lobbyList"></ul>
+    </section>
+
+    <section id="screenPlace" class="panel hidden">
+      <h2>Place ships</h2>
+      <div class="row">
+        <button type="button" id="orientBtn">Orientation: Horizontal</button>
+        <button type="button" id="btnRandom">Randomize</button>
+        <button class="primary" type="button" id="btnReady" disabled>Ready</button>
+      </div>
+      <p id="placeHint" style="color:var(--muted)">Pick a starting cell, then Place.</p>
+      <div class="split">
+        <div>
+          <div class="grid-label">Your grid (rows A–J, cols 1–10)</div>
+          <div id="placeGrid" class="grid-wrap"></div>
+        </div>
+        <div>
+          <div class="grid-label">Fleet</div>
+          <ul class="ships" id="fleetList"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="screenGame" class="panel hidden">
+      <div id="turnBanner" class="banner-wait">—</div>
+      <div class="split">
+        <div class="board-col">
+          <h2>Your board</h2>
+          <div id="ownGrid" class="grid-wrap"></div>
+        </div>
+        <div class="board-col" id="attackCol">
+          <h2>Attack</h2>
+          <div class="row">
+            <label>Target <select id="targetSelect"></select></label>
+          </div>
+          <div class="grid-label">Opponent (your shots only)</div>
+          <div id="attackGrid" class="grid-wrap"></div>
+        </div>
+      </div>
+      <h2 style="margin-top:12px">Log</h2>
+      <div id="log"></div>
+      <h2 style="margin-top:12px">Fleet health</h2>
+      <div class="status-bar" id="statusBar"></div>
+    </section>
+
+    <section id="screenEnd" class="panel hidden">
+      <h2>Game over</h2>
+      <p id="winnerLine"></p>
+      <div class="results"><ol id="standingsList"></ol></div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="btnPlayAgain">Play again</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="net-panel" id="netPanel">
+    <h3><span>Network stats</span><span id="netToggle">▼</span></h3>
+    <div class="net-body" id="netBody">
+      <div>WS: <strong id="netWs">CLOSED</strong></div>
+      <div>RTT: <strong id="netRtt">—</strong> ms</div>
+      <div>Sent: <strong id="netSent">0</strong> / Recv: <strong id="netRecv">0</strong></div>
+      <div>Bytes ↑ <strong id="netBytesUp">0</strong> / ↓ <strong id="netBytesDown">0</strong></div>
+      <div>Last msg: <strong id="netLast">—</strong></div>
+    </div>
+  </div>
+
+  <script>
+(function () {
+  const ROWS = 'ABCDEFGHIJ';
+  const COLS = [1,2,3,4,5,6,7,8,9,10];
+  const FLEET = [
+    { name: 'Carrier', len: 5 },
+    { name: 'Battleship', len: 4 },
+    { name: 'Cruiser', len: 3 },
+    { name: 'Submarine', len: 3 },
+    { name: 'Destroyer', len: 2 },
+  ];
+  const STORAGE_KEY = 'battleship_player';
+  const RECONNECT_MS = 3000;
+  const RECONNECT_MAX = 10;
+  const PING_MS = 5000;
+
+  const $ = (id) => document.getElementById(id);
+
+  const net = {
+    sent: 0,
+    recv: 0,
+    bytesUp: 0,
+    bytesDown: 0,
+    lastTs: null,
+    wsState: 'CLOSED',
+    rtt: null,
+    collapsed: false,
+  };
+
+  let ws = null;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  let pingTimer = null;
+  let joinFresh = false;
+  let myId = null;
+  let myName = '';
+  let phase = 'join';
+  let currentTurnId = null;
+  let orientH = true;
+  let pendingStart = null;
+  let placed = [];
+  let pendingCells = null;
+
+  function wsUrl() {
+    const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return p + '//' + location.host;
+  }
+
+  function logConsole(dir, payload) {
+    const t = new Date().toISOString().slice(11, 23);
+    console.log(`[${t}] ${dir}`, payload);
+  }
+
+  function fmtTime() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8);
+  }
+
+  function logLine(text) {
+    const el = $('log');
+    el.textContent += `[${fmtTime()}] ${text}\n`;
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function setNetWsState(s) {
+    net.wsState = s;
+    $('netWs').textContent = s;
+  }
+
+  function touchLast() {
+    net.lastTs = new Date();
+    $('netLast').textContent = net.lastTs.toLocaleTimeString();
+  }
+
+  function send(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const raw = JSON.stringify(obj);
+    net.sent++;
+    net.bytesUp += raw.length;
+    $('netSent').textContent = net.sent;
+    $('netBytesUp').textContent = net.bytesUp;
+    touchLast();
+    logConsole('↑', raw);
+    ws.send(raw);
+  }
+
+  function savePlayer(id, name) {
+    myId = id;
+    myName = name;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ id, name }));
+    } catch (_) {}
+  }
+
+  function loadPlayer() {
+    try {
+      const j = localStorage.getItem(STORAGE_KEY);
+      if (!j) return null;
+      return JSON.parse(j);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function allCellsSet() {
+    const s = new Set();
+    for (const r of ROWS) for (const c of COLS) s.add(r + c);
+    return s;
+  }
+  const ALL = allCellsSet();
+
+  function parseCellKey(key) {
+    if (!key || key.length < 2) return null;
+    const row = key[0].toUpperCase();
+    const col = parseInt(key.slice(1), 10);
+    if (!ROWS.includes(row) || !COLS.includes(col)) return null;
+    return { row, col, key: row + col };
+  }
+
+  function buildGrid(container, opts) {
+    const { onCellClick, cellClass } = opts || {};
+    container.innerHTML = '';
+    const table = document.createElement('table');
+    table.className = 'grid';
+    const tr0 = document.createElement('tr');
+    tr0.appendChild(document.createElement('td')).className = 'corner';
+    for (const c of COLS) {
+      const td = document.createElement('td');
+      td.className = 'header';
+      td.textContent = c;
+      tr0.appendChild(td);
+    }
+    table.appendChild(tr0);
+    for (const r of ROWS) {
+      const tr = document.createElement('tr');
+      const h = document.createElement('td');
+      h.className = 'header';
+      h.textContent = r;
+      tr.appendChild(h);
+      for (const c of COLS) {
+        const key = r + c;
+        const td = document.createElement('td');
+        td.className = 'cell';
+        td.dataset.cell = key;
+        td.addEventListener('click', () => onCellClick && onCellClick(key, td));
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+    container.appendChild(table);
+    return table;
+  }
+
+  function paintPlacementPreview() {
+    const table = $('placeGrid').querySelector('table');
+    if (!table) return;
+    for (const td of table.querySelectorAll('td.cell')) {
+      td.classList.remove('valid', 'invalid', 'ship');
+    }
+    const occ = new Set(placed.flatMap((s) => s.cells));
+    for (const s of placed) {
+      for (const c of s.cells) {
+        const td = table.querySelector(`[data-cell="${c}"]`);
+        if (td) td.classList.add('ship');
+      }
+    }
+    const cur = FLEET.find((f) => !placed.some((p) => p.name === f.name));
+    if (!cur || !pendingStart) return;
+    const line = lineFrom(pendingStart, cur.len, orientH);
+    const valid = line && isLineValid(line, occ, cur.len);
+    for (const c of line || []) {
+      const td = table.querySelector(`[data-cell="${c}"]`);
+      if (td) td.classList.add(valid ? 'valid' : 'invalid');
+    }
+  }
+
+  function lineFrom(start, len, horizontal) {
+    const p = parseCellKey(start);
+    if (!p) return null;
+    const out = [];
+    if (horizontal) {
+      for (let i = 0; i < len; i++) {
+        const col = p.col + i;
+        if (col > 10) return null;
+        out.push(p.row + col);
+      }
+    } else {
+      const ri = ROWS.indexOf(p.row);
+      for (let i = 0; i < len; i++) {
+        const r = ROWS[ri + i];
+        if (!r) return null;
+        out.push(r + p.col);
+      }
+    }
+    return out;
+  }
+
+  function isLineValid(cells, occ, len) {
+    if (!cells || cells.length !== len) return false;
+    for (const c of cells) {
+      if (!ALL.has(c) || occ.has(c)) return false;
+    }
+    return true;
+  }
+
+  function updateFleetList() {
+    const ul = $('fleetList');
+    ul.innerHTML = '';
+    for (const f of FLEET) {
+      const li = document.createElement('li');
+      const done = placed.find((p) => p.name === f.name);
+      li.textContent = done ? `${f.name} (${f.len}) ✓` : `${f.name} (${f.len})`;
+      ul.appendChild(li);
+    }
+    const allDone = FLEET.every((f) => placed.some((p) => p.name === f.name));
+    $('btnReady').disabled = !allDone;
+  }
+
+  function initPlacementUI() {
+    placed = [];
+    pendingStart = null;
+    $('placeGrid').innerHTML = '';
+    buildGrid($('placeGrid'), {
+      onCellClick: (key) => {
+        const cur = FLEET.find((f) => !placed.some((p) => p.name === f.name));
+        if (!cur) return;
+        pendingStart = key;
+        paintPlacementPreview();
+      },
+    });
+    $('orientBtn').textContent = 'Orientation: Horizontal';
+    orientH = true;
+    $('orientBtn').onclick = () => {
+      orientH = !orientH;
+      $('orientBtn').textContent = orientH ? 'Orientation: Horizontal' : 'Orientation: Vertical';
+      paintPlacementPreview();
+    };
+    $('btnRandom').onclick = () => {
+      randomizeFleet();
+      pendingStart = null;
+      paintPlacementPreview();
+      updateFleetList();
+    };
+    $('btnReady').onclick = () => {
+      send({ type: 'place', ships: placed });
+    };
+    const cur = FLEET.find((f) => !placed.some((p) => p.name === f.name));
+    $('placeHint').textContent = cur
+      ? `Placing ${cur.name} (${cur.len}). Click start cell, then Place.`
+      : 'All ships placed. Click Ready.';
+    updateFleetList();
+    paintPlacementPreview();
+  }
+
+  function addPlaceButton() {
+    if ($('btnPlaceShip')) return;
+    const b = document.createElement('button');
+    b.id = 'btnPlaceShip';
+    b.textContent = 'Place';
+    b.style.marginLeft = '8px';
+    $('screenPlace').querySelector('.row').appendChild(b);
+    b.onclick = () => {
+      const cur = FLEET.find((f) => !placed.some((p) => p.name === f.name));
+      if (!cur || !pendingStart) return;
+      const occ = new Set(placed.flatMap((s) => s.cells));
+      const line = lineFrom(pendingStart, cur.len, orientH);
+      if (!isLineValid(line, occ, cur.len)) return;
+      placed.push({ name: cur.name, cells: line });
+      pendingStart = null;
+      updateFleetList();
+      const n = FLEET.find((f) => !placed.some((p) => p.name === f.name));
+      $('placeHint').textContent = n
+        ? `Placing ${n.name} (${n.len}). Click start cell, then Place.`
+        : 'All ships placed. Click Ready.';
+      paintPlacementPreview();
+    };
+  }
+
+  function randomizeFleet() {
+    for (let attempt = 0; attempt < 500; attempt++) {
+      placed = [];
+      const occ = new Set();
+      let ok = true;
+      for (const f of FLEET) {
+        let placedOne = false;
+        for (let t = 0; t < 400; t++) {
+          const ri = Math.floor(Math.random() * ROWS.length);
+          const ci = Math.floor(Math.random() * COLS.length);
+          const start = ROWS[ri] + COLS[ci];
+          const horiz = Math.random() < 0.5;
+          let line = lineFrom(start, f.len, horiz);
+          if (!line || !isLineValid(line, occ, f.len)) line = lineFrom(start, f.len, !horiz);
+          if (line && isLineValid(line, occ, f.len)) {
+            placed.push({ name: f.name, cells: line });
+            for (const c of line) occ.add(c);
+            placedOne = true;
+            break;
+          }
+        }
+        if (!placedOne) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok && placed.length === FLEET.length) return;
+    }
+  }
+
+  function showScreen(name) {
+    phase = name;
+    ['screenJoin', 'screenLobby', 'screenPlace', 'screenGame', 'screenEnd'].forEach((id) => {
+      $(id).classList.add('hidden');
+    });
+    if (name === 'join') $('screenJoin').classList.remove('hidden');
+    if (name === 'lobby') $('screenLobby').classList.remove('hidden');
+    if (name === 'place') {
+      $('screenPlace').classList.remove('hidden');
+      addPlaceButton();
+      initPlacementUI();
+    }
+    if (name === 'game') $('screenGame').classList.remove('hidden');
+    if (name === 'end') $('screenEnd').classList.remove('hidden');
+  }
+
+  function renderOwnBoard(you) {
+    const host = $('ownGrid');
+    host.innerHTML = '';
+    const hits = new Set(you.ownBoard.hits || []);
+    const misses = new Set(you.ownBoard.misses || []);
+    const shipCells = new Map();
+    (you.ownShips || []).forEach((s) => s.cells.forEach((c) => shipCells.set(c, s.name)));
+    buildGrid(host, {
+      onCellClick: () => {},
+    });
+    const table = host.querySelector('table');
+    for (const td of table.querySelectorAll('td.cell')) {
+      const k = td.dataset.cell;
+      td.classList.add('disabled');
+      if (hits.has(k)) {
+        td.classList.add('hit');
+        td.textContent = '×';
+      } else if (misses.has(k)) {
+        td.classList.add('miss');
+        td.textContent = '·';
+      } else if (shipCells.has(k)) {
+        td.classList.add('ship');
+        td.textContent = '';
+      }
+    }
+  }
+
+  function renderAttackGrid(you) {
+    const sel = $('targetSelect');
+    const tid = sel.value;
+    const atk = (you.attacks || []).find((a) => a.targetId === tid);
+    const cells = new Map((atk && atk.cells) ? atk.cells.map((x) => [x.cell, x.result]) : []);
+    const host = $('attackGrid');
+    host.innerHTML = '';
+    const myTurn = currentTurnId === myId;
+    buildGrid(host, {
+      onCellClick: (key) => {
+        if (!myTurn || !tid) return;
+        send({ type: 'fire', target: tid, cell: key });
+      },
+    });
+    const table = host.querySelector('table');
+    for (const td of table.querySelectorAll('td.cell')) {
+      const k = td.dataset.cell;
+      if (!myTurn) td.classList.add('disabled');
+      if (cells.get(k) === 'hit') {
+        td.classList.add('hit');
+        td.textContent = '×';
+      } else if (cells.get(k) === 'miss') {
+        td.classList.add('miss');
+        td.textContent = '·';
+      }
+    }
+  }
+
+  function fillTargets(you) {
+    const sel = $('targetSelect');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const o of you.livingOpponents || []) {
+      const opt = document.createElement('option');
+      opt.value = o.id;
+      opt.textContent = o.name;
+      sel.appendChild(opt);
+    }
+    if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    else if (sel.options[0]) sel.value = sel.options[0].value;
+    sel.onchange = () => renderAttackGrid(lastYou);
+  }
+
+  let lastYou = null;
+  function applyState(you) {
+    lastYou = you;
+    fillTargets(you);
+    renderOwnBoard(you);
+    renderAttackGrid(you);
+    const bar = $('statusBar');
+    bar.innerHTML = '';
+    for (const s of you.shipCounts || []) {
+      const sp = document.createElement('span');
+      const bits = [`${s.name}: ${s.remaining} cells`];
+      if (s.eliminated) bits.push('OUT');
+      if (s.disconnected) bits.push('DC');
+      sp.textContent = bits.join(' · ');
+      bar.appendChild(sp);
+    }
+    const myTurn = currentTurnId === myId;
+    $('attackCol').classList.toggle('attack-active', myTurn);
+    $('turnBanner').className = myTurn ? 'banner-turn' : 'banner-wait';
+    $('turnBanner').textContent = myTurn ? 'Your turn — choose target and cell' : 'Waiting for other players…';
+  }
+
+  function handleMsg(msg) {
+    touchLast();
+    logConsole('↓', JSON.stringify(msg));
+    switch (msg.type) {
+      case 'pong': {
+        if (msg.ts != null) net.rtt = Date.now() - msg.ts;
+        $('netRtt').textContent = net.rtt != null ? String(net.rtt) : '—';
+        break;
+      }
+      case 'joined':
+        savePlayer(msg.playerId, msg.name);
+        if (msg.phase === 'lobby') showScreen('lobby');
+        else if (msg.phase === 'placement') showScreen('place');
+        break;
+      case 'lobby_update':
+        if (msg.phase === 'placement') {
+          showScreen('place');
+        } else {
+          showScreen('lobby');
+          $('lobbyMsg').textContent = msg.waiting
+            ? 'Waiting for at least 3 players (4th can join within a short window).'
+            : 'Lobby';
+        }
+        $('lobbyList').innerHTML = msg.players.map((p) => `<li>${p.name} ${p.ready ? '(ready)' : ''}</li>`).join('');
+        break;
+      case 'game_start':
+        showScreen('game');
+        $('log').textContent = '';
+        logLine('Game started.');
+        applyState(msg.you);
+        break;
+      case 'state':
+        if ($('screenGame').classList.contains('hidden')) break;
+        applyState(msg.you);
+        break;
+      case 'your_turn':
+        currentTurnId = msg.playerId;
+        if (lastYou) applyState(lastYou);
+        break;
+      case 'fire_result': {
+        const sunk = msg.shipSunk ? ` Sunk ${msg.shipSunk}!` : '';
+        const next = msg.result === 'hit' ? `${msg.shooter.name} fires again.` : 'Turn passes.';
+        logLine(
+          `${msg.shooter.name} → ${msg.target.name} @ ${msg.cell} — ${msg.result.toUpperCase()}!${sunk} ${next}`,
+        );
+        break;
+      }
+      case 'player_eliminated':
+        logLine(`Player eliminated: ${msg.playerId}`);
+        break;
+      case 'game_over': {
+        showScreen('end');
+        const w = msg.winner;
+        $('winnerLine').textContent = w ? `Winner: ${w.name}` : 'No winner.';
+        $('standingsList').innerHTML = (msg.standings || [])
+          .map((s) => `<li>#${s.rank} ${s.name}${s.eliminated ? ' (eliminated)' : ''}</li>`)
+          .join('');
+        break;
+      }
+      case 'error':
+        logLine('Error: ' + msg.message);
+        alert(msg.message);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function connectSocket() {
+    if (ws) {
+      try {
+        ws.close();
+      } catch (_) {}
+      ws = null;
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    setNetWsState(reconnectAttempts > 0 ? 'RECONNECTING' : 'CLOSED');
+    if (reconnectAttempts > 0) $('reconnectBanner').classList.remove('hidden');
+    else $('reconnectBanner').classList.add('hidden');
+
+    ws = new WebSocket(wsUrl());
+    ws.addEventListener('open', () => {
+      reconnectAttempts = 0;
+      $('reconnectBanner').classList.add('hidden');
+      setNetWsState('OPEN');
+      if (joinFresh) {
+        joinFresh = false;
+        try {
+          localStorage.removeItem(STORAGE_KEY);
+        } catch (_) {}
+        send({ type: 'join', name: myName });
+      } else {
+        const saved = loadPlayer();
+        if (saved && saved.id && saved.name) {
+          send({ type: 'join', name: saved.name, playerId: saved.id });
+        } else if (myName) {
+          send({ type: 'join', name: myName });
+        }
+      }
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) send({ type: 'ping', ts: Date.now() });
+      }, PING_MS);
+    });
+    ws.addEventListener('message', (ev) => {
+      net.recv++;
+      const raw = typeof ev.data === 'string' ? ev.data : '';
+      net.bytesDown += raw.length;
+      $('netRecv').textContent = net.recv;
+      $('netBytesDown').textContent = net.bytesDown;
+      touchLast();
+      logConsole('↓', raw);
+      let msg;
+      try {
+        msg = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      handleMsg(msg);
+    });
+    ws.addEventListener('close', () => {
+      setNetWsState('CLOSED');
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      if (reconnectAttempts >= RECONNECT_MAX) {
+        $('reconnectBanner').textContent = 'Disconnected — refresh to retry.';
+        $('reconnectBanner').classList.remove('hidden');
+        return;
+      }
+      reconnectAttempts++;
+      $('reconnectBanner').textContent = `Reconnecting… (${reconnectAttempts}/${RECONNECT_MAX})`;
+      $('reconnectBanner').classList.remove('hidden');
+      reconnectTimer = setTimeout(connectSocket, RECONNECT_MS);
+    });
+    ws.addEventListener('error', () => {});
+  }
+
+  $('btnJoin').onclick = () => {
+    const n = $('username').value.trim().slice(0, 32);
+    if (!n) return alert('Enter a username');
+    myName = n;
+    joinFresh = true;
+    connectSocket();
+    $('screenJoin').classList.add('hidden');
+    showScreen('lobby');
+  };
+
+  $('btnPlayAgain').onclick = () => {
+    send({ type: 'ready_again' });
+    showScreen('lobby');
+  };
+
+  $('netPanel').querySelector('h3').onclick = () => {
+    net.collapsed = !net.collapsed;
+    $('netBody').classList.toggle('collapsed', net.collapsed);
+    $('netToggle').textContent = net.collapsed ? '▶' : '▼';
+  };
+
+  if (location.protocol === 'file:') {
+    $('lobbyMsg').textContent = 'Open this app via http://localhost:PORT (not file://) so WebSockets work.';
+  }
+})();
+  </script>
+</body>
+</html>
