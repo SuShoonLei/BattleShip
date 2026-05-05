@@ -2,9 +2,10 @@ package battleship;
 
 import java.util.List;
 
-/**
+/*
  * Same rules as the Node edition: 3–4 players, 10×10, standard fleet.
  */
+
 public final class GameConstants {
   private GameConstants() {}
 
