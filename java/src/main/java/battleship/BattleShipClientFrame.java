@@ -50,6 +50,7 @@ import org.java_websocket.handshake.ServerHandshake;
 /**
  * Swing UI + WebSocket client (same JSON protocol as the Node server).
  */
+
 public final class BattleShipClientFrame extends JFrame {
   private static final Gson GSON = new Gson();
   private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
