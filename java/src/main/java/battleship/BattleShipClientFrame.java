@@ -13,11 +13,15 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridLayout;
-import java.net.URI;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +30,7 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.prefs.Preferences;
 import javax.swing.BorderFactory;
@@ -44,11 +49,9 @@ import javax.swing.JTextField;
 import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
 import javax.swing.border.TitledBorder;
-import org.java_websocket.client.WebSocketClient;
-import org.java_websocket.handshake.ServerHandshake;
 
 /**
- * Swing UI + WebSocket client (same JSON protocol as the Node server).
+ * Swing UI + TCP client (newline-delimited JSON, same protocol as the NIO server).
  */
 
 public final class BattleShipClientFrame extends JFrame {
@@ -95,7 +98,7 @@ public final class BattleShipClientFrame extends JFrame {
   private final JTextArea endText = new JTextArea(6, 40);
   private final JButton btnPlayAgain = new JButton("Play again");
 
-  private GameSocket wsClient;
+  private TcpClient tcpClient;
   private final ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(r -> {
     Thread t = new Thread(r, "battleship-client");
     t.setDaemon(true);
@@ -142,7 +145,7 @@ public final class BattleShipClientFrame extends JFrame {
   private JPanel buildNetBar() {
     JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT));
     p.setBorder(BorderFactory.createTitledBorder("Network stats"));
-    p.add(new JLabel("WS:"));
+    p.add(new JLabel("TCP:"));
     p.add(netWs);
     p.add(new JLabel(" RTT ms:"));
     p.add(netRtt);
@@ -510,11 +513,9 @@ public final class BattleShipClientFrame extends JFrame {
       pingFuture.cancel(false);
       pingFuture = null;
     }
-    if (wsClient != null) {
-      try {
-        wsClient.close();
-      } catch (Exception ignored) {
-      }
+    if (tcpClient != null) {
+      tcpClient.close();
+      tcpClient = null;
     }
     if (reconnectTimer != null) {
       reconnectTimer.stop();
@@ -526,20 +527,13 @@ public final class BattleShipClientFrame extends JFrame {
       port = Integer.parseInt(joinPort.getText().trim());
     } catch (NumberFormatException ignored) {
     }
-    URI uri;
-    try {
-      uri = new URI("ws://" + host + ":" + port + "/");
-    } catch (Exception e) {
-      JOptionPane.showMessageDialog(this, "Bad host/port: " + e.getMessage());
-      return;
-    }
     netWs.setText(reconnectAttempts > 0 ? "RECONNECTING" : "CLOSED");
-    wsClient = new GameSocket(uri);
-    wsClient.connect();
+    tcpClient = new TcpClient(host, port);
+    tcpClient.connect();
     pingFuture =
         sched.scheduleAtFixedRate(
             () -> {
-              if (wsClient != null && wsClient.isOpen()) {
+              if (tcpClient != null && tcpClient.isOpen()) {
                 JsonObject ping = new JsonObject();
                 ping.addProperty("type", "ping");
                 ping.addProperty("ts", System.currentTimeMillis());
@@ -552,7 +546,7 @@ public final class BattleShipClientFrame extends JFrame {
   }
 
   private void sendJson(JsonObject o) {
-    if (wsClient == null || !wsClient.isOpen()) return;
+    if (tcpClient == null || !tcpClient.isOpen()) return;
     String raw = GSON.toJson(o);
     netSentCount++;
     netBytesUp += raw.length();
@@ -560,7 +554,7 @@ public final class BattleShipClientFrame extends JFrame {
     netUp.setText(String.valueOf(netBytesUp));
     touchLast();
     System.out.println("↑ " + LocalTime.now().format(TIME_FMT) + " " + raw);
-    wsClient.send(raw);
+    tcpClient.send(raw);
   }
 
   private void touchLast() {
@@ -574,11 +568,14 @@ public final class BattleShipClientFrame extends JFrame {
       return;
     }
     reconnectAttempts++;
-    reconnectLabel.setText("Reconnecting… " + reconnectAttempts + "/10");
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 30s.
+    int delayMs = Math.min(30_000, 1_000 << Math.min(reconnectAttempts - 1, 5));
+    reconnectLabel.setText(
+        "Reconnecting in " + (delayMs / 1000) + "s… (attempt " + reconnectAttempts + "/10)");
     netWs.setText("RECONNECTING");
     reconnectTimer =
         new javax.swing.Timer(
-            3000,
+            delayMs,
             ev -> {
               joinFresh = false;
               connectSocket();
@@ -817,15 +814,27 @@ public final class BattleShipClientFrame extends JFrame {
     }
   }
 
-  private final class GameSocket extends WebSocketClient {
-    GameSocket(URI uri) {
-      super(uri);
+  private final class TcpClient {
+    private final String host;
+    private final int port;
+    private final long encryptionKey = ThreadLocalRandom.current().nextLong();
+    private volatile Socket socket;
+    private volatile OutputStream out;
+    private volatile boolean open;
+
+    TcpClient(String host, int port) {
+      this.host = host;
+      this.port = port;
     }
 
-    @Override
-    public void onOpen(ServerHandshake handshakedata) {
-      SwingUtilities.invokeLater(
-          () -> {
+    void connect() {
+      Thread t = new Thread(() -> {
+        try {
+          socket = new Socket(host, port);
+          socket.setTcpNoDelay(true);
+          out = socket.getOutputStream();
+          open = true;
+          SwingUtilities.invokeLater(() -> {
             netWs.setText("OPEN");
             JsonObject m = new JsonObject();
             m.addProperty("type", "join");
@@ -844,25 +853,46 @@ public final class BattleShipClientFrame extends JFrame {
             }
             sendJson(m);
           });
-    }
-
-    @Override
-    public void onMessage(String message) {
-      SwingUtilities.invokeLater(() -> handleInbound(message));
-    }
-
-    @Override
-    public void onClose(int code, String reason, boolean remote) {
-      SwingUtilities.invokeLater(
-          () -> {
+          DataInputStream dis = new DataInputStream(socket.getInputStream());
+          while (true) {
+            int idLen  = dis.readInt(); byte[] idB  = new byte[idLen];  dis.readFully(idB);
+            int sidLen = dis.readInt(); byte[] sidB = new byte[sidLen]; dis.readFully(sidB);
+            long key   = dis.readLong();
+            int datLen = dis.readInt(); byte[] datB = new byte[datLen]; dis.readFully(datB);
+            String data = new String(Packet.xorEncrypt(datB, key), StandardCharsets.UTF_8);
+            SwingUtilities.invokeLater(() -> handleInbound(data));
+          }
+        } catch (IOException e) {
+          // connection failed or broken — fall through to finally
+        } finally {
+          open = false;
+          SwingUtilities.invokeLater(() -> {
             netWs.setText("CLOSED");
             scheduleReconnect();
           });
+        }
+      }, "battleship-tcp");
+      t.setDaemon(true);
+      t.start();
     }
 
-    @Override
-    public void onError(Exception ex) {
-      ex.printStackTrace();
+    synchronized void send(String raw) {
+      OutputStream o = out;
+      if (o == null) return;
+      try {
+        ByteBuffer buf = new Packet("client", encryptionKey, raw).toBytes();
+        o.write(buf.array(), buf.arrayOffset() + buf.position(), buf.remaining());
+        o.flush();
+      } catch (IOException e) {
+        close();
+      }
+    }
+
+    boolean isOpen() { return open; }
+
+    void close() {
+      open = false;
+      try { if (socket != null) socket.close(); } catch (IOException ignored) {}
     }
   }
 }

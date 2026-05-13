@@ -3,12 +3,10 @@ package battleship;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledFuture;
-import org.java_websocket.WebSocket;
-
 public final class Player {
   public final String id;
   public final String name;
-  public WebSocket ws;
+  public Connection conn;
   public Long disconnectedAt;
   public ScheduledFuture<?> disconnectTimer;
   public List<Ship> ships;
@@ -21,7 +19,7 @@ public final class Player {
     this.ships = null;
     this.placementDone = false;
     this.eliminated = false;
-    this.ws = null;
+    this.conn = null;
     this.disconnectedAt = null;
     this.disconnectTimer = null;
   }

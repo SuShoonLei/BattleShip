@@ -22,11 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import org.java_websocket.WebSocket;
 
-/**
- * In-memory game state and rules (ported from server.js). Sends JSON over each player's WebSocket.
- */
 
 public final class GameEngine {
   private static final Gson GSON = new Gson();
@@ -43,27 +39,28 @@ public final class GameEngine {
   private final Map<String, Set<String>> boardMisses = new ConcurrentHashMap<>();
   private String winnerId;
   private JsonArray standingsCache;
+  private ScheduledFuture<?> turnTimer;
 
   public GameEngine(ScheduledExecutorService scheduler) {
     this.scheduler = scheduler;
   }
 
-  public void handleMessage(WebSocket ws, String raw) {
+  public void handleMessage(Connection conn, String raw) {
     synchronized (lock) {
-      handleMessageLocked(ws, raw);
+      handleMessageLocked(conn, raw);
     }
   }
 
-  private void handleMessageLocked(WebSocket ws, String raw) {
+  private void handleMessageLocked(Connection conn, String raw) {
     JsonObject msg;
     try {
       msg = JsonParser.parseString(raw).getAsJsonObject();
     } catch (Exception e) {
-      sendError(ws, "Invalid JSON.");
+      sendError(conn, "Invalid JSON.");
       return;
     }
     if (!msg.has("type") || msg.get("type").isJsonNull()) {
-      sendError(ws, "Missing type.");
+      sendError(conn, "Missing type.");
       return;
     }
     String type = msg.get("type").getAsString();
@@ -71,38 +68,38 @@ public final class GameEngine {
       JsonObject pong = new JsonObject();
       pong.addProperty("type", "pong");
       if (msg.has("ts")) pong.add("ts", msg.get("ts"));
-      if (ws.isOpen()) ws.send(GSON.toJson(pong));
+      conn.send(GSON.toJson(pong));
       return;
     }
     if ("join".equals(type)) {
-      handleJoin(ws, msg);
+      handleJoin(conn, msg);
       return;
     }
-    String playerId = ws.getAttachment() != null ? ws.getAttachment().toString() : null;
+    String playerId = conn.getAttachment() != null ? conn.getAttachment().toString() : null;
     if (playerId == null || !players.containsKey(playerId)) {
-      sendError(ws, "Join first.");
+      sendError(conn, "Join first.");
       return;
     }
     Player player = players.get(playerId);
     switch (type) {
-      case "place" -> handlePlace(ws, player, msg);
-      case "fire" -> handleFire(ws, playerId, msg);
-      case "ready_again" -> handleReadyAgain(ws, player);
-      default -> sendError(ws, "Unknown type: " + type);
+      case "place" -> handlePlace(conn, player, msg);
+      case "fire" -> handleFire(conn, playerId, msg);
+      case "ready_again" -> handleReadyAgain(conn, player);
+      default -> sendError(conn, "Unknown type: " + type);
     }
   }
 
-  public void onSocketClosed(WebSocket ws) {
+  public void onSocketClosed(Connection conn) {
     synchronized (lock) {
-      onSocketClosedLocked(ws);
+      onSocketClosedLocked(conn);
     }
   }
 
-  private void onSocketClosedLocked(WebSocket ws) {
-    String id = ws.getAttachment() != null ? ws.getAttachment().toString() : null;
+  private void onSocketClosedLocked(Connection conn) {
+    String id = conn.getAttachment() != null ? conn.getAttachment().toString() : null;
     if (id == null || !players.containsKey(id)) return;
     Player p = players.get(id);
-    p.ws = null;
+    p.conn = null;
     p.disconnectedAt = System.currentTimeMillis();
     if (phase == GamePhase.PLAYING || phase == GamePhase.PLACEMENT) {
       scheduleDisconnectElimination(p);
@@ -119,18 +116,18 @@ public final class GameEngine {
   }
 
   private static boolean isDisconnected(Player p) {
-    return p.ws == null || !p.ws.isOpen();
+    return p.conn == null || !p.conn.isOpen();
   }
 
   private void send(Player p, JsonObject o) {
-    if (p.ws != null && p.ws.isOpen()) p.ws.send(GSON.toJson(o));
+    if (p.conn != null && p.conn.isOpen()) p.conn.send(GSON.toJson(o));
   }
 
-  private void sendError(WebSocket ws, String message) {
+  private void sendError(Connection conn, String message) {
     JsonObject o = new JsonObject();
     o.addProperty("type", "error");
     o.addProperty("message", message);
-    if (ws.isOpen()) ws.send(GSON.toJson(o));
+    conn.send(GSON.toJson(o));
   }
 
   private void broadcastLobby() {
@@ -140,7 +137,7 @@ public final class GameEngine {
   }
 
   private void sendRaw(Player p, String json) {
-    if (p.ws != null && p.ws.isOpen()) p.ws.send(json);
+    if (p.conn != null && p.conn.isOpen()) p.conn.send(json);
   }
 
   private JsonObject lobbyPayload() {
@@ -227,6 +224,7 @@ public final class GameEngine {
   }
 
   private void notifyTurn() {
+    cancelTurnTimer();
     if (turnOrder.isEmpty()) return;
     String pid = turnOrder.get(currentTurnIndex);
     Player p = players.get(pid);
@@ -239,10 +237,21 @@ public final class GameEngine {
     msg.addProperty("playerId", pid);
     String json = GSON.toJson(msg);
     for (Player pl : players.values()) sendRaw(pl, json);
+    // Auto-advance if the active player hasn't fired within the timeout window.
+    turnTimer = scheduler.schedule(() -> {
+      synchronized (lock) {
+        turnTimer = null;
+        if (phase != GamePhase.PLAYING) return;
+        if (!pid.equals(turnOrder.get(currentTurnIndex))) return;
+        System.out.println("Turn timeout — auto-advancing past " + pid);
+        advanceTurnFrom(currentTurnIndex);
+      }
+    }, GameConstants.TURN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
   }
 
   private void checkGameOver() {
     if (phase == GamePhase.ENDED) return;
+    cancelTurnTimer();
     List<Player> alive = players.values().stream().filter(p -> !p.eliminated).toList();
     if (alive.size() > 1) return;
     phase = GamePhase.ENDED;
@@ -309,6 +318,13 @@ public final class GameEngine {
     }
   }
 
+  private void cancelTurnTimer() {
+    if (turnTimer != null) {
+      turnTimer.cancel(false);
+      turnTimer = null;
+    }
+  }
+
   private void cancelPlayerTimer(Player p) {
     if (p.disconnectTimer != null) {
       p.disconnectTimer.cancel(false);
@@ -325,7 +341,7 @@ public final class GameEngine {
               synchronized (lock) {
                 p.disconnectTimer = null;
                 if (phase != GamePhase.PLAYING && phase != GamePhase.PLACEMENT) return;
-                if (p.ws != null && p.ws.isOpen()) return;
+                if (p.conn != null && p.conn.isOpen()) return;
                 p.disconnectedAt = null;
                 if (phase == GamePhase.PLAYING) {
                   eliminatePlayer(p.id);
@@ -564,7 +580,7 @@ public final class GameEngine {
   }
 
   private void pushStateTo(Player p) {
-    if (phase == GamePhase.PLAYING && p.ws != null && p.ws.isOpen()) {
+    if (phase == GamePhase.PLAYING && p.conn != null && p.conn.isOpen()) {
       JsonObject o = new JsonObject();
       o.addProperty("type", "state");
       o.add("you", buildPrivateState(p));
@@ -572,29 +588,29 @@ public final class GameEngine {
     }
   }
 
-  private void handleFire(WebSocket ws, String playerId, JsonObject msg) {
+  private void handleFire(Connection conn, String playerId, JsonObject msg) {
     if (phase != GamePhase.PLAYING) {
-      sendError(ws, "Game not in progress.");
+      sendError(conn, "Game not in progress.");
       return;
     }
     Player shooter = players.get(playerId);
     if (shooter == null || shooter.eliminated || isDisconnected(shooter)) {
-      sendError(ws, "Invalid shooter.");
+      sendError(conn, "Invalid shooter.");
       return;
     }
     String currentId = turnOrder.get(currentTurnIndex);
     if (!playerId.equals(currentId)) {
-      sendError(ws, "Not your turn.");
+      sendError(conn, "Not your turn.");
       return;
     }
     if (!msg.has("target") || !msg.has("cell")) {
-      sendError(ws, "Invalid fire message.");
+      sendError(conn, "Invalid fire message.");
       return;
     }
     String targetId = msg.get("target").getAsString();
     Player target = players.get(targetId);
     if (target == null || target.id.equals(playerId) || target.eliminated) {
-      sendError(ws, "Invalid target.");
+      sendError(conn, "Invalid target.");
       return;
     }
     String cell =
@@ -602,13 +618,14 @@ public final class GameEngine {
             .map(CellUtil.ParsedCell::key)
             .orElse(null);
     if (cell == null) {
-      sendError(ws, "Invalid cell.");
+      sendError(conn, "Invalid cell.");
       return;
     }
+    cancelTurnTimer();
     String sk = CellUtil.shotKey(playerId, target.id);
     Map<String, String> grid = shots.computeIfAbsent(sk, k -> new HashMap<>());
     if (grid.containsKey(cell)) {
-      sendError(ws, "Already fired at that cell.");
+      sendError(conn, "Already fired at that cell.");
       return;
     }
     String shipName = cellToShipName(target, cell);
@@ -653,15 +670,15 @@ public final class GameEngine {
     for (Player p : players.values()) pushStateTo(p);
   }
 
-  private void handleJoin(WebSocket ws, JsonObject msg) {
+  private void handleJoin(Connection conn, JsonObject msg) {
     if (!msg.has("name")) {
-      sendError(ws, "Name required.");
+      sendError(conn, "Name required.");
       return;
     }
     String name = msg.get("name").getAsString().trim();
     if (name.length() > 32) name = name.substring(0, 32);
     if (name.isEmpty()) {
-      sendError(ws, "Name required.");
+      sendError(conn, "Name required.");
       return;
     }
     String existingId = msg.has("playerId") && !msg.get("playerId").isJsonNull()
@@ -670,18 +687,18 @@ public final class GameEngine {
     if (existingId != null && players.containsKey(existingId)) {
       Player p = players.get(existingId);
       if (!p.name.equals(name)) {
-        sendError(ws, "Name mismatch for reconnect.");
+        sendError(conn, "Name mismatch for reconnect.");
         return;
       }
       cancelPlayerTimer(p);
-      p.ws = ws;
-      ws.setAttachment(p.id);
+      p.conn = conn;
+      conn.setAttachment(p.id);
       JsonObject joined = new JsonObject();
       joined.addProperty("type", "joined");
       joined.addProperty("playerId", p.id);
       joined.addProperty("name", p.name);
       joined.addProperty("phase", phase.name().toLowerCase());
-      if (ws.isOpen()) ws.send(GSON.toJson(joined));
+      conn.send(GSON.toJson(joined));
       if (phase == GamePhase.LOBBY || phase == GamePhase.PLACEMENT) {
         broadcastLobby();
       } else if (phase == GamePhase.PLAYING) {
@@ -690,12 +707,12 @@ public final class GameEngine {
         gs.add("players", playersJsonBrief());
         gs.add("turnOrder", GSON.toJsonTree(turnOrder));
         gs.add("you", buildPrivateState(p));
-        if (ws.isOpen()) ws.send(GSON.toJson(gs));
+        conn.send(GSON.toJson(gs));
         String cur = turnOrder.get(currentTurnIndex);
         JsonObject yt = new JsonObject();
         yt.addProperty("type", "your_turn");
         yt.addProperty("playerId", cur);
-        if (ws.isOpen()) ws.send(GSON.toJson(yt));
+        conn.send(GSON.toJson(yt));
         pushStateTo(p);
       } else if (phase == GamePhase.ENDED && standingsCache != null) {
         Player wObj = winnerId != null ? players.get(winnerId) : null;
@@ -708,45 +725,45 @@ public final class GameEngine {
           go.add("winner", win);
         } else go.add("winner", JsonNull.INSTANCE);
         go.add("standings", standingsCache);
-        if (ws.isOpen()) ws.send(GSON.toJson(go));
+        conn.send(GSON.toJson(go));
       }
       return;
     }
     if (players.size() >= GameConstants.MAX_PLAYERS && existingId == null) {
-      sendError(ws, "Lobby full.");
+      sendError(conn, "Lobby full.");
       return;
     }
     if (phase != GamePhase.LOBBY) {
-      sendError(ws, "Game already started.");
+      sendError(conn, "Game already started.");
       return;
     }
     String id = randomId();
     Player p = new Player(id, name);
-    p.ws = ws;
-    ws.setAttachment(id);
+    p.conn = conn;
+    conn.setAttachment(id);
     players.put(id, p);
     JsonObject joined = new JsonObject();
     joined.addProperty("type", "joined");
     joined.addProperty("playerId", id);
     joined.addProperty("name", name);
     joined.addProperty("phase", phase.name().toLowerCase());
-    if (ws.isOpen()) ws.send(GSON.toJson(joined));
+    conn.send(GSON.toJson(joined));
     scheduleLobbyStart();
     broadcastLobby();
   }
 
-  private void handlePlace(WebSocket ws, Player player, JsonObject msg) {
+  private void handlePlace(Connection conn, Player player, JsonObject msg) {
     if (phase != GamePhase.PLACEMENT) {
-      sendError(ws, "Not in placement phase.");
+      sendError(conn, "Not in placement phase.");
       return;
     }
     if (!msg.has("ships") || !msg.get("ships").isJsonArray()) {
-      sendError(ws, "Invalid place message.");
+      sendError(conn, "Invalid place message.");
       return;
     }
     String err = validatePlacement(msg.getAsJsonArray("ships"));
     if (err != null) {
-      sendError(ws, err);
+      sendError(conn, err);
       return;
     }
     List<Player.Ship> list = new ArrayList<>();
@@ -765,11 +782,12 @@ public final class GameEngine {
     maybeStartPlaying();
   }
 
-  private void handleReadyAgain(WebSocket ws, Player player) {
+  private void handleReadyAgain(Connection conn, Player player) {
     if (phase != GamePhase.ENDED) {
-      sendError(ws, "Game not over.");
+      sendError(conn, "Game not over.");
       return;
     }
+    cancelTurnTimer();
     phase = GamePhase.LOBBY;
     turnOrder = new ArrayList<>();
     currentTurnIndex = 0;

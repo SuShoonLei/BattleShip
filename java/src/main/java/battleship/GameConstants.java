@@ -13,6 +13,10 @@ public final class GameConstants {
   public static final int MAX_PLAYERS = 4;
   public static final long RECONNECT_MS = 30_000;
   public static final long LOBBY_DEBOUNCE_MS = 2_000;
+  /** Server closes a connection that has sent no data for this long (ms). Must be > ping interval (5 s). */
+  public static final long DEAD_CONNECTION_MS = 15_000;
+  /** Auto-advance the turn if the active player hasn't fired within this window (ms). */
+  public static final long TURN_TIMEOUT_MS = 60_000;
   public static final String ROWS = "ABCDEFGHIJ";
 
   public record FleetSpec(String name, int len) {}
