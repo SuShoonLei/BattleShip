@@ -106,7 +106,9 @@ public final class BattleShipClientFrame extends JFrame {
   });
   private ScheduledFuture<?> pingFuture;
 
-  private boolean joinFresh;
+  private String currentCard = "JOIN";
+  private boolean gameStarted;
+  private boolean freshJoin;   // true = user clicked Connect (don't send saved ID)
   private String myId;
   private String myName = "";
   private String currentTurnId;
@@ -139,7 +141,12 @@ public final class BattleShipClientFrame extends JFrame {
     cards.add(buildEndPanel(), "END");
     add(cards, BorderLayout.CENTER);
     add(buildNetBar(), BorderLayout.SOUTH);
-    cardLayout.show(cards, "JOIN");
+    showCard("JOIN");
+  }
+
+  private void showCard(String name) {
+    cardLayout.show(cards, name);
+    currentCard = name;
   }
 
   private JPanel buildNetBar() {
@@ -503,9 +510,10 @@ public final class BattleShipClientFrame extends JFrame {
       return;
     }
     if (myName.length() > 32) myName = myName.substring(0, 32);
-    joinFresh = true;
+    freshJoin = true;
+    reconnectAttempts = 0;
     connectSocket();
-    cardLayout.show(cards, "LOBBY");
+    showCard("LOBBY");
   }
 
   private void connectSocket() {
@@ -565,6 +573,7 @@ public final class BattleShipClientFrame extends JFrame {
     if (reconnectAttempts >= 10) {
       reconnectLabel.setText("Disconnected — use Join again.");
       netWs.setText("CLOSED");
+      showCard("JOIN");
       return;
     }
     reconnectAttempts++;
@@ -574,12 +583,7 @@ public final class BattleShipClientFrame extends JFrame {
         "Reconnecting in " + (delayMs / 1000) + "s… (attempt " + reconnectAttempts + "/10)");
     netWs.setText("RECONNECTING");
     reconnectTimer =
-        new javax.swing.Timer(
-            delayMs,
-            ev -> {
-              joinFresh = false;
-              connectSocket();
-            });
+        new javax.swing.Timer(delayMs, ev -> { freshJoin = false; connectSocket(); });
     reconnectTimer.setRepeats(false);
     reconnectTimer.start();
   }
@@ -613,24 +617,42 @@ public final class BattleShipClientFrame extends JFrame {
         reconnectLabel.setText(" ");
         netWs.setText("OPEN");
         String ph = msg.get("phase").getAsString();
-        if ("lobby".equals(ph)) cardLayout.show(cards, "LOBBY");
-        else if ("placement".equals(ph)) {
+        if ("lobby".equals(ph)) {
+          showCard("LOBBY");
+        } else if ("placement".equals(ph)) {
           placed.clear();
           pendingStartCell = null;
+          // Restore previously placed ships sent back by server on reconnect
+          if (msg.has("ships") && msg.get("ships").isJsonArray()) {
+            for (JsonElement el : msg.getAsJsonArray("ships")) {
+              JsonObject o = el.getAsJsonObject();
+              Player.Ship sh = new Player.Ship();
+              sh.name = o.get("name").getAsString();
+              for (JsonElement c : o.getAsJsonArray("cells")) sh.cells.add(c.getAsString());
+              placed.add(sh);
+            }
+          }
           updatePlaceHint();
           refreshPlaceGrid();
-          cardLayout.show(cards, "PLACE");
+          showCard("PLACE");
+        } else if ("playing".equals(ph)) {
+          showCard("GAME");
         }
       }
       case "lobby_update" -> {
-        if ("placement".equals(msg.get("phase").getAsString())) {
-          placed.clear();
-          pendingStartCell = null;
-          updatePlaceHint();
-          refreshPlaceGrid();
-          cardLayout.show(cards, "PLACE");
+        String ph = msg.get("phase").getAsString();
+        if ("placement".equals(ph)) {
+          if (!"PLACE".equals(currentCard)) {
+            // Only reset when first transitioning into placement, not on every broadcast
+            placed.clear();
+            pendingStartCell = null;
+            updatePlaceHint();
+            refreshPlaceGrid();
+            showCard("PLACE");
+          }
         } else {
-          cardLayout.show(cards, "LOBBY");
+          showCard("LOBBY");
+          gameStarted = false;
         }
         StringBuilder sb = new StringBuilder();
         for (JsonElement el : msg.getAsJsonArray("players")) {
@@ -642,9 +664,14 @@ public final class BattleShipClientFrame extends JFrame {
         lobbyList.setText(sb.toString());
       }
       case "game_start" -> {
-        cardLayout.show(cards, "GAME");
-        gameLog.setText("");
-        appendLog("Game started.");
+        showCard("GAME");
+        if (!gameStarted) {
+          gameLog.setText("");
+          appendLog("Game started.");
+          gameStarted = true;
+        } else {
+          appendLog("Reconnected to game in progress.");
+        }
         lastYou = msg.getAsJsonObject("you");
         renderGameFromState();
       }
@@ -699,8 +726,14 @@ public final class BattleShipClientFrame extends JFrame {
         endText.setText(sb.toString());
       }
       case "error" -> {
-        appendLog("Error: " + msg.get("message").getAsString());
-        JOptionPane.showMessageDialog(this, msg.get("message").getAsString());
+        String errMsg = msg.get("message").getAsString();
+        appendLog("Error: " + errMsg);
+        // Stale ID rejected — wipe it so the next connect attempt is a fresh join
+        if ("Game already started.".equals(errMsg) || "Name mismatch for reconnect.".equals(errMsg)) {
+          PREFS.remove("playerId");
+          PREFS.remove("playerName");
+        }
+        JOptionPane.showMessageDialog(this, errMsg);
       }
       default -> {}
     }
@@ -821,6 +854,7 @@ public final class BattleShipClientFrame extends JFrame {
     private volatile Socket socket;
     private volatile OutputStream out;
     private volatile boolean open;
+    private volatile boolean closedByOwner;
 
     TcpClient(String host, int port) {
       this.host = host;
@@ -838,18 +872,20 @@ public final class BattleShipClientFrame extends JFrame {
             netWs.setText("OPEN");
             JsonObject m = new JsonObject();
             m.addProperty("type", "join");
-            if (joinFresh) {
-              PREFS.remove("playerId");
-              m.addProperty("name", myName);
-            } else {
+            if (!freshJoin) {
+              // Automatic reconnect after disconnect: try to resume the existing session.
               String pid = PREFS.get("playerId", null);
-              String pn = PREFS.get("playerName", myName);
+              String savedName = PREFS.get("playerName", myName);
               if (pid != null) {
-                m.addProperty("name", pn);
+                m.addProperty("name", savedName);
                 m.addProperty("playerId", pid);
               } else {
                 m.addProperty("name", myName);
               }
+            } else {
+              // User clicked Connect — always start fresh so that multiple clients
+              // on the same machine each get their own player slot.
+              m.addProperty("name", myName);
             }
             sendJson(m);
           });
@@ -866,9 +902,12 @@ public final class BattleShipClientFrame extends JFrame {
           // connection failed or broken — fall through to finally
         } finally {
           open = false;
+          final boolean skip = closedByOwner;
           SwingUtilities.invokeLater(() -> {
-            netWs.setText("CLOSED");
-            scheduleReconnect();
+            if (!skip) {
+              netWs.setText("CLOSED");
+              scheduleReconnect();
+            }
           });
         }
       }, "battleship-tcp");
@@ -884,13 +923,20 @@ public final class BattleShipClientFrame extends JFrame {
         o.write(buf.array(), buf.arrayOffset() + buf.position(), buf.remaining());
         o.flush();
       } catch (IOException e) {
-        close();
+        // Close socket so the read loop also dies; leave closedByOwner=false so
+        // the finally block schedules a reconnect.
+        out = null;
+        open = false;
+        Socket s = socket;
+        if (s != null) try { s.close(); } catch (IOException ignored) {}
       }
     }
 
     boolean isOpen() { return open; }
 
     void close() {
+      // Caller-initiated close: suppress the automatic scheduleReconnect.
+      closedByOwner = true;
       open = false;
       try { if (socket != null) socket.close(); } catch (IOException ignored) {}
     }

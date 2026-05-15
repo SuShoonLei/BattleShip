@@ -39,21 +39,28 @@ public final class BattleShipServer {
 
       serverChannel.bind(new InetSocketAddress(port));
       serverChannel.configureBlocking(false);
-      serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+      serverChannel.register(selector, SelectionKey.OP_ACCEPT); //tell me when someone tires to connect
       System.out.println("Battleship server listening on port " + port);
 
       // reuse the same NioConnection per channel so attachment (player ID) persists
       Map<SocketChannel, NioConnection> connections = new HashMap<>();
       Map<SocketChannel, ByteArrayOutputStream> buffers = new HashMap<>();
-      ByteBuffer readBuf = ByteBuffer.allocate(4096);
+      //Map<String, PlayerSession> sessions = new HashMap<>(); // players saved by usrname
+      //Map<SocketChannel, PlayerSession> channelToSession = new HashMap<>(); // stores player socketchannel
+      ByteBuffer readBuf = ByteBuffer.allocate(4096); // temp memory for incoming network data
 
       while (true) {
+        long now = System.currentTimeMillis();
+
         selector.select(5_000);
         Iterator<SelectionKey> it = selector.selectedKeys().iterator();
+        //Iterator<PlayerSession> sessionIt = sessions.values().iterator();
+
         while (it.hasNext()) {
           SelectionKey key = it.next();
           it.remove();
 
+          //if a new player wants to join
           if (key.isAcceptable()) {
             SocketChannel client = serverChannel.accept();
             if (client != null) {
@@ -63,6 +70,7 @@ public final class BattleShipServer {
               buffers.put(client, new ByteArrayOutputStream());
             }
 
+            //if a player sent data
           } else if (key.isReadable()) {
             SocketChannel client = (SocketChannel) key.channel();
             NioConnection conn = connections.get(client);
@@ -73,13 +81,16 @@ public final class BattleShipServer {
             } catch (IOException e) {
               n = -1;
             }
+            //if client disconnect
             if (n == -1) {
+              System.out.println("Client disconnected");
               engine.onSocketClosed(conn);
               connections.remove(client);
               buffers.remove(client);
               key.cancel();
               client.close();
-            } else {
+            }
+            else {
               conn.touch();
               readBuf.flip();
               ByteArrayOutputStream acc = buffers.get(client);
@@ -101,7 +112,6 @@ public final class BattleShipServer {
         }
 
         // Drop connections that haven't sent any data (including pings) within the dead-connection window.
-        long now = System.currentTimeMillis();
         Iterator<Map.Entry<SocketChannel, NioConnection>> connIt = connections.entrySet().iterator();
         while (connIt.hasNext()) {
           Map.Entry<SocketChannel, NioConnection> entry = connIt.next();

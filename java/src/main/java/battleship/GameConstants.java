@@ -17,6 +17,8 @@ public final class GameConstants {
   public static final long DEAD_CONNECTION_MS = 15_000;
   /** Auto-advance the turn if the active player hasn't fired within this window (ms). */
   public static final long TURN_TIMEOUT_MS = 60_000;
+  /** Kick a connected player who hasn't placed ships within this window (ms). */
+  public static final long PLACEMENT_TIMEOUT_MS = 90_000;
   public static final String ROWS = "ABCDEFGHIJ";
 
   public record FleetSpec(String name, int len) {}

@@ -40,6 +40,8 @@ public final class GameEngine {
   private String winnerId;
   private JsonArray standingsCache;
   private ScheduledFuture<?> turnTimer;
+  // Populated when PLACEMENT begins; lets players rejoin by name if they lost their playerId.
+  private final Map<String, String> sessionNameToId = new HashMap<>();
 
   public GameEngine(ScheduledExecutorService scheduler) {
     this.scheduler = scheduler;
@@ -301,11 +303,7 @@ public final class GameEngine {
     Player p = players.get(playerId);
     if (p == null || p.eliminated) return;
     p.eliminated = true;
-    JsonObject ev = new JsonObject();
-    ev.addProperty("type", "player_eliminated");
-    ev.addProperty("playerId", playerId);
-    String j = GSON.toJson(ev);
-    for (Player pl : players.values()) sendRaw(pl, j);
+    broadcastElimination(playerId, "all ships sunk");
     checkGameOver();
     if (phase != GamePhase.PLAYING) return;
     String currentId = turnOrder.get(currentTurnIndex);
@@ -333,6 +331,41 @@ public final class GameEngine {
     p.disconnectedAt = null;
   }
 
+  private void schedulePlacementTimeout(Player p) {
+    cancelPlayerTimer(p);
+    p.disconnectTimer = scheduler.schedule(() -> {
+      synchronized (lock) {
+        p.disconnectTimer = null;
+        if (phase != GamePhase.PLACEMENT) return;
+        if (p.placementDone) return;
+        System.out.println("Placement timeout — removing idle player: " + p.name);
+        broadcastElimination(p.id, "placement timeout");
+        players.remove(p.id);
+        if (players.size() < GameConstants.MIN_PLAYERS) {
+          phase = GamePhase.LOBBY;
+          for (Player pl : players.values()) {
+            pl.placementDone = false;
+            pl.ships = null;
+            cancelPlayerTimer(pl);
+          }
+          broadcastLobby();
+        } else {
+          broadcastLobby();
+          maybeStartPlaying();
+        }
+      }
+    }, GameConstants.PLACEMENT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+  }
+
+  private void broadcastElimination(String playerId, String reason) {
+    JsonObject ev = new JsonObject();
+    ev.addProperty("type", "player_eliminated");
+    ev.addProperty("playerId", playerId);
+    ev.addProperty("reason", reason);
+    String j = GSON.toJson(ev);
+    for (Player pl : players.values()) sendRaw(pl, j);
+  }
+
   private void scheduleDisconnectElimination(Player p) {
     cancelPlayerTimer(p);
     p.disconnectTimer =
@@ -353,9 +386,15 @@ public final class GameEngine {
                     for (Player pl : players.values()) {
                       pl.placementDone = false;
                       pl.ships = null;
+                      cancelPlayerTimer(pl);
                     }
+                    broadcastLobby();
+                  } else {
+                    broadcastLobby();
+                    // The disconnected player may have been the only unplaced one;
+                    // give remaining players a chance to start.
+                    maybeStartPlaying();
                   }
-                  broadcastLobby();
                 }
               }
             },
@@ -434,9 +473,12 @@ public final class GameEngine {
     if (players.size() < GameConstants.MIN_PLAYERS || players.size() > GameConstants.MAX_PLAYERS)
       return;
     phase = GamePhase.PLACEMENT;
+    sessionNameToId.clear();
     for (Player p : players.values()) {
       p.placementDone = false;
       p.ships = null;
+      sessionNameToId.put(p.name.toLowerCase(), p.id);
+      schedulePlacementTimeout(p);
     }
     broadcastLobby();
   }
@@ -684,20 +726,52 @@ public final class GameEngine {
     String existingId = msg.has("playerId") && !msg.get("playerId").isJsonNull()
         ? msg.get("playerId").getAsString()
         : null;
+    System.out.println("[JOIN] name=" + name + " existingId=" + existingId
+        + " phase=" + phase + " players=" + players.keySet());
+    // Name-based session lookup: reconnect by name when game is active but no playerId provided.
+    if (existingId == null && phase != GamePhase.LOBBY) {
+      String sid = sessionNameToId.get(name.toLowerCase());
+      System.out.println("[JOIN] session lookup name=" + name.toLowerCase()
+          + " → sid=" + sid
+          + (sid != null && players.containsKey(sid)
+              ? " disconnected=" + isDisconnected(players.get(sid)) : ""));
+      if (sid != null && players.containsKey(sid) && isDisconnected(players.get(sid))) {
+        existingId = sid;
+        System.out.println("[JOIN] session reconnect by name: " + name + " → " + existingId);
+      }
+    }
     if (existingId != null && players.containsKey(existingId)) {
       Player p = players.get(existingId);
-      if (!p.name.equals(name)) {
+      System.out.println("[JOIN] reconnecting player " + p.name + " id=" + p.id
+          + " phase=" + phase + " placementDone=" + p.placementDone);
+      if (!p.name.equalsIgnoreCase(name)) {
+        System.out.println("[JOIN] name mismatch: stored=" + p.name + " got=" + name);
         sendError(conn, "Name mismatch for reconnect.");
         return;
       }
       cancelPlayerTimer(p);
       p.conn = conn;
       conn.setAttachment(p.id);
+      // If reconnecting during placement and not yet placed, restart the timeout clock.
+      if (phase == GamePhase.PLACEMENT && !p.placementDone) {
+        schedulePlacementTimeout(p);
+      }
       JsonObject joined = new JsonObject();
       joined.addProperty("type", "joined");
       joined.addProperty("playerId", p.id);
       joined.addProperty("name", p.name);
       joined.addProperty("phase", phase.name().toLowerCase());
+      // Restore previously placed ships so client doesn't have to re-place
+      if (phase == GamePhase.PLACEMENT && p.placementDone && p.ships != null) {
+        JsonArray shipsArr = new JsonArray();
+        for (Player.Ship sh : p.ships) {
+          JsonObject so = new JsonObject();
+          so.addProperty("name", sh.name);
+          so.add("cells", GSON.toJsonTree(sh.cells));
+          shipsArr.add(so);
+        }
+        joined.add("ships", shipsArr);
+      }
       conn.send(GSON.toJson(joined));
       if (phase == GamePhase.LOBBY || phase == GamePhase.PLACEMENT) {
         broadcastLobby();
@@ -778,6 +852,7 @@ public final class GameEngine {
     }
     player.ships = list;
     player.placementDone = true;
+    cancelPlayerTimer(player);  // cancel the placement timeout
     broadcastLobby();
     maybeStartPlaying();
   }
@@ -796,6 +871,7 @@ public final class GameEngine {
     boardMisses.clear();
     winnerId = null;
     standingsCache = null;
+    sessionNameToId.clear();
     for (Player p : players.values()) {
       p.ships = null;
       p.placementDone = false;

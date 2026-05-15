@@ -269,6 +269,8 @@
   let pendingStart = null;
   let placed = [];
   let pendingCells = null;
+  let gameStarted = false;
+  let playerNames = {};
 
   function wsUrl() {
     const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -536,16 +538,19 @@
   }
 
   function showScreen(name) {
+    const prevPhase = phase;
     phase = name;
     ['screenJoin', 'screenLobby', 'screenPlace', 'screenGame', 'screenEnd'].forEach((id) => {
       $(id).classList.add('hidden');
     });
     if (name === 'join') $('screenJoin').classList.remove('hidden');
-    if (name === 'lobby') $('screenLobby').classList.remove('hidden');
+    if (name === 'lobby') { $('screenLobby').classList.remove('hidden'); gameStarted = false; }
     if (name === 'place') {
       $('screenPlace').classList.remove('hidden');
       addPlaceButton();
-      initPlacementUI();
+      // Only reset placement state when transitioning in; repeated lobby_update broadcasts
+      // during placement must not wipe ships the player has already placed.
+      if (prevPhase !== 'place') initPlacementUI();
     }
     if (name === 'game') $('screenGame').classList.remove('hidden');
     if (name === 'end') $('screenEnd').classList.remove('hidden');
@@ -645,21 +650,35 @@
 
   function handleMsg(msg) {
     touchLast();
-    logConsole('↓', JSON.stringify(msg));
     switch (msg.type) {
       case 'pong': {
         if (msg.ts != null) net.rtt = Date.now() - msg.ts;
         $('netRtt').textContent = net.rtt != null ? String(net.rtt) : '—';
         break;
       }
-      case 'joined':
+      case 'joined': {
         savePlayer(msg.playerId, msg.name);
-        if (msg.phase === 'lobby') showScreen('lobby');
-        else if (msg.phase === 'placement') showScreen('place');
+        reconnectAttempts = 0;
+        $('reconnectBanner').classList.add('hidden');
+        if (msg.phase === 'lobby') {
+          showScreen('lobby');
+        } else if (msg.phase === 'placement') {
+          // Restore already-placed ships sent back by the server on reconnect.
+          const restored = msg.ships ? msg.ships.map((s) => ({ name: s.name, cells: [...s.cells] })) : null;
+          showScreen('place');
+          if (restored && restored.length > 0) {
+            placed = restored;
+            updateFleetList();
+            paintPlacementPreview();
+          }
+        } else if (msg.phase === 'playing') {
+          showScreen('game'); // game_start follows immediately with full state
+        }
         break;
+      }
       case 'lobby_update':
         if (msg.phase === 'placement') {
-          showScreen('place');
+          showScreen('place'); // showScreen skips initPlacementUI if already on place screen
         } else {
           showScreen('lobby');
           $('lobbyMsg').textContent = msg.waiting
@@ -670,8 +689,14 @@
         break;
       case 'game_start':
         showScreen('game');
-        $('log').textContent = '';
-        logLine('Game started.');
+        for (const p of msg.players || []) playerNames[p.id] = p.name;
+        if (!gameStarted) {
+          $('log').textContent = '';
+          logLine('Game started.');
+          gameStarted = true;
+        } else {
+          logLine('Reconnected to game in progress.');
+        }
         applyState(msg.you);
         break;
       case 'state':
@@ -691,7 +716,7 @@
         break;
       }
       case 'player_eliminated':
-        logLine(`Player eliminated: ${msg.playerId}`);
+        logLine(`Player eliminated: ${playerNames[msg.playerId] || msg.playerId}${msg.reason ? ' (' + msg.reason + ')' : ''}`);
         break;
       case 'game_over': {
         showScreen('end');
@@ -704,6 +729,9 @@
       }
       case 'error':
         logLine('Error: ' + msg.message);
+        if (msg.message === 'Game already started.' || msg.message === 'Name mismatch for reconnect.') {
+          try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+        }
         alert(msg.message);
         break;
       default:

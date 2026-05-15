@@ -102,6 +102,8 @@ function createPlayer(id, name) {
 let phase = 'lobby';
 /** @type {Map<string, ReturnType<typeof createPlayer>>} */
 const players = new Map();
+/** name.toLowerCase() → playerId; populated at placement start so players can rejoin by name. */
+const sessionNameToId = new Map();
 /** @type {NodeJS.Timeout | null} */
 let lobbyTimer = null;
 const LOBBY_DEBOUNCE_MS = 2000;
@@ -281,8 +283,11 @@ function scheduleDisconnectElimination(p) {
           pl.placementDone = false;
           pl.ships = null;
         }
+        broadcastLobby();
+      } else {
+        broadcastLobby();
+        maybeStartPlaying();
       }
-      broadcastLobby();
     }
   }, RECONNECT_MS);
 }
@@ -335,9 +340,11 @@ function beginPlacement() {
   if (phase !== 'lobby') return;
   if (players.size < MIN_PLAYERS || players.size > MAX_PLAYERS) return;
   phase = 'placement';
+  sessionNameToId.clear();
   for (const p of players.values()) {
     p.placementDone = false;
     p.ships = null;
+    sessionNameToId.set(p.name.toLowerCase(), p.id);
   }
   broadcastLobby();
 }
@@ -529,16 +536,26 @@ function handleMessage(ws, raw) {
       sendError(ws, 'Name required.');
       return;
     }
-    const existingId = typeof msg.playerId === 'string' ? msg.playerId : null;
+    let existingId = typeof msg.playerId === 'string' ? msg.playerId : null;
+    // Name-based session lookup: lets a player rejoin by name alone when game is active.
+    if (!existingId && phase !== 'lobby') {
+      const sid = sessionNameToId.get(name.toLowerCase());
+      if (sid && players.has(sid) && isDisconnected(players.get(sid))) {
+        existingId = sid;
+      }
+    }
     if (existingId && players.has(existingId)) {
       const p = players.get(existingId);
-      if (p.name !== name) {
+      if (p.name.toLowerCase() !== name.toLowerCase()) {
         sendError(ws, 'Name mismatch for reconnect.');
         return;
       }
       clearDisconnectTimer(p);
       attachWs(p, ws);
-      send(ws, { type: 'joined', playerId: p.id, name: p.name, phase });
+      const joinedMsg = { type: 'joined', playerId: p.id, name: p.name, phase };
+      // Send placed ships back so the client doesn't need to re-place on PLACEMENT reconnect.
+      if (phase === 'placement' && p.placementDone && p.ships) joinedMsg.ships = p.ships;
+      send(ws, joinedMsg);
       if (phase === 'lobby' || phase === 'placement') broadcastLobby();
       else if (phase === 'playing') {
         send(ws, {
@@ -616,6 +633,7 @@ function handleMessage(ws, raw) {
     boardMisses.clear();
     winnerId = null;
     standings = null;
+    sessionNameToId.clear();
     for (const p of players.values()) {
       p.ships = null;
       p.placementDone = false;
